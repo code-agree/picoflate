@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-#include "fast_raw_deflate/raw_deflate.h"
+#include "picoflate/picoflate.h"
 
 #include <zlib.h>
-#ifdef FAST_RAW_DEFLATE_HAS_LIBDEFLATE
+#ifdef PICOFLATE_HAS_LIBDEFLATE
 #include <libdeflate.h>
 #endif
 
@@ -465,10 +465,10 @@ int main(int argc, char** argv) {
     deflateEnd(&zc);
 
     FastRawDeflateBaselineV0 fast_v0;
-    fast_raw_deflate::FastRawDeflate fast_opt;
+    picoflate::Inflater fast_opt;
     z_stream zs{};
     inflateInit2(&zs, -MAX_WBITS);
-#ifdef FAST_RAW_DEFLATE_HAS_LIBDEFLATE
+#ifdef PICOFLATE_HAS_LIBDEFLATE
     libdeflate_decompressor* libdef = libdeflate_alloc_decompressor();
 #endif
 
@@ -544,7 +544,7 @@ int main(int argc, char** argv) {
         });
         emit("zlib", st_zlib);
 
-        const auto st_v0 = RunBench("FastRawDeflate_v0", c.id, rounds, iters, &rounds_csv, [&]() {
+        const auto st_v0 = RunBench("picoflate_v0", c.id, rounds, iters, &rounds_csv, [&]() {
             std::size_t olen = 0;
             const bool ok = fast_v0.Inflate(const_cast<const std::uint8_t*>(vs), vl,
                                             out.data(), 65536, olen);
@@ -554,9 +554,9 @@ int main(int argc, char** argv) {
             (void)ok;
 #endif
         });
-        emit("FastRawDeflate_v0", st_v0);
+        emit("picoflate_v0", st_v0);
 
-#ifdef FAST_RAW_DEFLATE_HAS_LIBDEFLATE
+#ifdef PICOFLATE_HAS_LIBDEFLATE
         const auto st_lib = RunBench("libdeflate_v1.22", c.id, rounds, iters, &rounds_csv, [&]() {
             std::size_t olen = 0;
             const auto rc = libdeflate_deflate_decompress(
@@ -570,7 +570,7 @@ int main(int argc, char** argv) {
         emit("libdeflate_v1.22", st_lib);
 #endif
 
-        const auto st_opt = RunBench("FastRawDeflate", c.id, rounds, iters, &rounds_csv, [&]() {
+        const auto st_opt = RunBench("picoflate", c.id, rounds, iters, &rounds_csv, [&]() {
             std::size_t olen = 0;
             const bool ok = fast_opt.Inflate(const_cast<const std::uint8_t*>(vs), vl,
                                              out.data(), 65536, olen);
@@ -580,10 +580,10 @@ int main(int argc, char** argv) {
             (void)ok;
 #endif
         });
-        emit("FastRawDeflate", st_opt);
+        emit("picoflate", st_opt);
     }
 
-#ifdef FAST_RAW_DEFLATE_HAS_LIBDEFLATE
+#ifdef PICOFLATE_HAS_LIBDEFLATE
     libdeflate_free_decompressor(libdef);
 #endif
     inflateEnd(&zs);

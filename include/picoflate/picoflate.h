@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Author: yuwenjun | Date: 2026-11-25
+// picoflate — Sub-microsecond zero-allocation RFC 1951 raw-deflate decompressor
+// Author: yuwenjun
 #pragma once
 
 #if defined(__BMI2__) && (defined(__x86_64__) || defined(_M_X64))
@@ -14,64 +15,66 @@
 #include <cstring>
 
 #if defined(__GNUC__) || defined(__clang__)
-#define FAST_RAW_DEFLATE_FORCE_INLINE inline __attribute__((always_inline))
-#define FAST_RAW_DEFLATE_NOINLINE     __attribute__((noinline))
-#define FAST_RAW_DEFLATE_HOT          __attribute__((hot))
-#define FAST_RAW_DEFLATE_LIKELY(x)    __builtin_expect(!!(x), 1)
-#define FAST_RAW_DEFLATE_UNLIKELY(x)  __builtin_expect(!!(x), 0)
-#define FAST_RAW_DEFLATE_RESTRICT     __restrict__
+#define PICOFLATE_FORCE_INLINE inline __attribute__((always_inline))
+#define PICOFLATE_NOINLINE     __attribute__((noinline))
+#define PICOFLATE_HOT          __attribute__((hot))
+#define PICOFLATE_LIKELY(x)    __builtin_expect(!!(x), 1)
+#define PICOFLATE_UNLIKELY(x)  __builtin_expect(!!(x), 0)
+#define PICOFLATE_RESTRICT     __restrict__
 #elif defined(_MSC_VER)
-#define FAST_RAW_DEFLATE_FORCE_INLINE __forceinline
-#define FAST_RAW_DEFLATE_NOINLINE     __declspec(noinline)
-#define FAST_RAW_DEFLATE_HOT
-#define FAST_RAW_DEFLATE_LIKELY(x)    (x)
-#define FAST_RAW_DEFLATE_UNLIKELY(x)  (x)
-#define FAST_RAW_DEFLATE_RESTRICT     __restrict
+#define PICOFLATE_FORCE_INLINE __forceinline
+#define PICOFLATE_NOINLINE     __declspec(noinline)
+#define PICOFLATE_HOT
+#define PICOFLATE_LIKELY(x)    (x)
+#define PICOFLATE_UNLIKELY(x)  (x)
+#define PICOFLATE_RESTRICT     __restrict
 #else
-#define FAST_RAW_DEFLATE_FORCE_INLINE inline
-#define FAST_RAW_DEFLATE_NOINLINE
-#define FAST_RAW_DEFLATE_HOT
-#define FAST_RAW_DEFLATE_LIKELY(x)    (x)
-#define FAST_RAW_DEFLATE_UNLIKELY(x)  (x)
-#define FAST_RAW_DEFLATE_RESTRICT
+#define PICOFLATE_FORCE_INLINE inline
+#define PICOFLATE_NOINLINE
+#define PICOFLATE_HOT
+#define PICOFLATE_LIKELY(x)    (x)
+#define PICOFLATE_UNLIKELY(x)  (x)
+#define PICOFLATE_RESTRICT
 #endif
 
 #if defined(__clang__)
-#define FAST_RAW_DEFLATE_NOVECTOR \
+#define PICOFLATE_NOVECTOR \
     _Pragma("clang loop vectorize(disable) interleave(disable)")
 #elif defined(__GNUC__)
-#define FAST_RAW_DEFLATE_NOVECTOR _Pragma("GCC novector")
+#define PICOFLATE_NOVECTOR _Pragma("GCC novector")
 #else
-#define FAST_RAW_DEFLATE_NOVECTOR
+#define PICOFLATE_NOVECTOR
 #endif
 
 // C++26 P2795R5 opt-out from automatic erroneous-value zeroing on scratch arrays
 #if __has_cpp_attribute(indeterminate)
-#define FAST_RAW_DEFLATE_INDETERMINATE [[indeterminate]]
+#define PICOFLATE_INDETERMINATE [[indeterminate]]
 #else
-#define FAST_RAW_DEFLATE_INDETERMINATE
+#define PICOFLATE_INDETERMINATE
 #endif
 
-namespace fast_raw_deflate {
+namespace picoflate {
 
-// Ultra-fast, zero-allocation, header-only one-shot RFC 1951 raw-deflate (wbits = -15)
-// decoder tuned for small-to-medium low-latency payloads (100 B .. 16 KB, such as
-// exchange WebSocket compressed order-book diffs).
+// Sub-microsecond, zero-allocation, header-only one-shot RFC 1951 raw-deflate (wbits = -15)
+// decompressor engineered from first principles for small-packet streaming (100 B .. 16 KB,
+// such as stateless WebSocket `permessage-deflate` frames and L2 order-book incremental diffs).
 //
-// Key design choices:
-// 1. Fused pre-baked RLE + active-symbol collector: precode symbols {0, 17, 18} fold
-//    zero-runs into a single branchless index advance without allocating or scanning
-//    a `lens[320]` buffer (eliminating RLE zero-stores and store-forwarding stalls).
-// 2. Dynamic primary litlen table width `min(10, max_len)` + power-of-2 incremental
-//    table doubling + 32-bit pre-baked decode entries folding literal flags, match
-//    bases, and extra-bit counts into a single lookup and shift.
-// 3. Bounds-hoisted fastloop with branchless 64-bit bitbuffer refills, entry
-//    preloading overlapped with LZ77 match copies, 3x fast-literal unrolling, and
-//    BMI2 `_bzhi_u64` bitfield extraction on x86-64.
-// 4. C++23/C++26 clean (`std::bit_floor` + `[[assume]]`, C++26 `[[indeterminate]]`)
-//    with strict RFC 1951 validation (oversubscribed/incomplete trees, invalid symbols
-//    286..287 & dist 30..31, RLE/offset bounds, and exact bit-level overread checks).
-class FastRawDeflate {
+// First-principles design pillars:
+// 1. Zero-materialization fused RLE (`lens[]`-free Dynamic Huffman setup): precode symbols
+//    {0, 17, 18} fold zero-length runs into a single branchless cursor advance without ever
+//    allocating, writing, or rescanning a `lens[320]` array (eliminating dead-alphabet scans
+//    and `offsets[0]++` store-to-load forwarding stalls).
+// 2. Entropy-proportional primary table width `min(10, max_len)` + inline 32-byte block
+//    doubling + 32-bit pre-baked decode entries folding literal sign flags, match bases,
+//    and `codeword_bits + extra_bits` into a single lookup and shift.
+// 3. Bounds-hoisted FastLoop with branchless 64-bit bitbuffer refills, next-symbol table
+//    preload overlapped with 16-byte unaligned LZ77 match copies, 3x fast-literal unrolling,
+//    and explicit BMI2 `_bzhi_u64` bitfield extraction on x86-64.
+// 4. Zero-cost C++23/C++26 semantics (`std::bit_floor` + `[[assume]]`, C++26 `[[indeterminate]]`)
+//    with strict RFC 1951 validation (oversubscribed/incomplete trees, reserved symbols
+//    286..287 & dist 30..31 folded into `kExceptional`, RLE/offset bounds, and bit-exact
+//    end-of-stream overread checks).
+class Inflater {
 public:
     static constexpr unsigned kPrecodeBits = 7;
     static constexpr std::size_t kPrecodeTableSize = 1U << kPrecodeBits;  // 128
@@ -99,16 +102,16 @@ public:
     static constexpr std::size_t kFastLoopPreRefillMargin = kFastLoopInMargin + 7;  // 22
     static constexpr std::size_t kFastLoopMaxBytesWritten = 2 + 258;
 
-    FastRawDeflate() noexcept = default;
+    Inflater() noexcept = default;
 
     // Decompresses raw-deflate `src[0..src_len)` into `dst[0..dst_cap)`.
     // Caller MUST ensure `dst` has at least `kRequiredOutputSlack` (16) extra writable
     // slack bytes beyond `dst_cap` (i.e. buffer allocation >= `dst_cap + 16`).
-    [[nodiscard]] FAST_RAW_DEFLATE_HOT bool Inflate(
-        const std::uint8_t* FAST_RAW_DEFLATE_RESTRICT src, std::size_t src_len,
-        char* FAST_RAW_DEFLATE_RESTRICT dst, std::size_t dst_cap,
+    [[nodiscard]] PICOFLATE_HOT bool Inflate(
+        const std::uint8_t* PICOFLATE_RESTRICT src, std::size_t src_len,
+        char* PICOFLATE_RESTRICT dst, std::size_t dst_cap,
         std::size_t& out_len) noexcept {
-        if (FAST_RAW_DEFLATE_UNLIKELY(src_len == 0 || dst_cap == 0)) return false;
+        if (PICOFLATE_UNLIKELY(src_len == 0 || dst_cap == 0)) return false;
 
         const std::uint8_t* in = src;
         const std::uint8_t* const in_end = src + src_len;
@@ -126,7 +129,7 @@ public:
 
         bool is_final = false;
         do {
-            if (FAST_RAW_DEFLATE_UNLIKELY(
+            if (PICOFLATE_UNLIKELY(
                     !RefillSafe(in, in_end, bitbuf, bitsleft, overread_count))) {
                 return false;
             }
@@ -137,11 +140,11 @@ public:
             const std::uint32_t* d_tab = nullptr;
             std::uint64_t ll_mask = 0;
 
-            if (FAST_RAW_DEFLATE_LIKELY(btype == 2U)) {
+            if (PICOFLATE_LIKELY(btype == 2U)) {
                 const DynHeaderResult dyn =
                     DecodeDynamicTrees(in, in_end, bitbuf, bitsleft, overread_count);
                 const unsigned ll_bits = static_cast<unsigned>(dyn.packed >> 48);
-                if (FAST_RAW_DEFLATE_UNLIKELY(ll_bits == 0)) return false;
+                if (PICOFLATE_UNLIKELY(ll_bits == 0)) return false;
                 in += static_cast<std::uint32_t>(dyn.packed);
                 bitbuf = dyn.bitbuf;
                 bitsleft = static_cast<std::uint8_t>(dyn.packed >> 32);
@@ -157,22 +160,22 @@ public:
                 ll_mask = (1ULL << 9U) - 1ULL;
             } else if (btype == 0U) {
                 bitsleft = static_cast<std::uint8_t>(bitsleft - 3U);
-                if (FAST_RAW_DEFLATE_UNLIKELY(overread_count > (bitsleft >> 3))) return false;
+                if (PICOFLATE_UNLIKELY(overread_count > (bitsleft >> 3))) return false;
                 in -= (bitsleft >> 3) - overread_count;
                 overread_count = 0;
                 bitbuf = 0;
                 bitsleft = 0;
-                if (FAST_RAW_DEFLATE_UNLIKELY(in_end - in < 4)) return false;
+                if (PICOFLATE_UNLIKELY(in_end - in < 4)) return false;
                 std::uint16_t len = 0;
                 std::uint16_t nlen = 0;
                 std::memcpy(&len, in, 2);
                 std::memcpy(&nlen, in + 2, 2);
                 in += 4;
-                if (FAST_RAW_DEFLATE_UNLIKELY(len != static_cast<std::uint16_t>(~nlen))) {
+                if (PICOFLATE_UNLIKELY(len != static_cast<std::uint16_t>(~nlen))) {
                     return false;
                 }
-                if (FAST_RAW_DEFLATE_UNLIKELY(len > static_cast<std::size_t>(in_end - in) ||
-                                              len > static_cast<std::size_t>(out_end - out))) {
+                if (PICOFLATE_UNLIKELY(len > static_cast<std::size_t>(in_end - in) ||
+                                       len > static_cast<std::size_t>(out_end - out))) {
                     return false;
                 }
                 std::memcpy(out, in, len);
@@ -214,9 +217,9 @@ public:
                         }
                     }
 
-                    if (FAST_RAW_DEFLATE_UNLIKELY((entry & kExceptional) != 0)) {
+                    if (PICOFLATE_UNLIKELY((entry & kExceptional) != 0)) {
                         if ((entry & kEndOfBlock) != 0) goto block_done;
-                        if (FAST_RAW_DEFLATE_UNLIKELY((entry & kSubtablePtr) == 0)) return false;
+                        if (PICOFLATE_UNLIKELY((entry & kSubtablePtr) == 0)) return false;
                         entry = ll_tab[(entry >> 16) +
                                        ExtractVarBits(bitbuf, (entry >> 8) & 0x3FU)];
                         saved_bitbuf = bitbuf;
@@ -240,9 +243,9 @@ public:
                                                    static_cast<std::uint8_t>(entry >> 8));
 
                     std::uint32_t d_entry = d_tab[bitbuf & kDistMask];
-                    if (FAST_RAW_DEFLATE_UNLIKELY((d_entry & kExceptional) != 0)) {
-                        if (FAST_RAW_DEFLATE_UNLIKELY((d_entry & kSubtablePtr) == 0)) return false;
-                        if (FAST_RAW_DEFLATE_UNLIKELY(
+                    if (PICOFLATE_UNLIKELY((d_entry & kExceptional) != 0)) {
+                        if (PICOFLATE_UNLIKELY((d_entry & kSubtablePtr) == 0)) return false;
+                        if (PICOFLATE_UNLIKELY(
                                 static_cast<std::uint8_t>(bitsleft) < 28U + kLitLenMaxBits)) {
                             RefillBranchless(in, bitbuf, bitsleft);
                         }
@@ -250,8 +253,8 @@ public:
                         bitsleft -= kDistBits;
                         d_entry = d_tab[(d_entry >> 16) +
                                         ExtractVarBits(bitbuf, (d_entry >> 8) & 0x3FU)];
-                        if (FAST_RAW_DEFLATE_UNLIKELY((d_entry & kExceptional) != 0)) return false;
-                    } else if (FAST_RAW_DEFLATE_UNLIKELY(
+                        if (PICOFLATE_UNLIKELY((d_entry & kExceptional) != 0)) return false;
+                    } else if (PICOFLATE_UNLIKELY(
                                    static_cast<std::uint8_t>(bitsleft) <
                                    (kDistBits + 13U) + kLitLenMaxBits)) {
                         RefillBranchless(in, bitbuf, bitsleft);
@@ -265,7 +268,7 @@ public:
                         static_cast<std::size_t>(ExtractVarBits8(saved_bitbuf, d_entry) >>
                                                  static_cast<std::uint8_t>(d_entry >> 8));
 
-                    if (FAST_RAW_DEFLATE_UNLIKELY(dist > static_cast<std::size_t>(out - dst))) {
+                    if (PICOFLATE_UNLIKELY(dist > static_cast<std::size_t>(out - dst))) {
                         return false;
                     }
                     const char* match = out - dist;
@@ -282,7 +285,7 @@ public:
 
             // Safe tail loop near end of input/output buffers.
             for (;;) {
-                if (FAST_RAW_DEFLATE_UNLIKELY(
+                if (PICOFLATE_UNLIKELY(
                         !RefillSafe(in, in_end, bitbuf, bitsleft, overread_count))) {
                     return false;
                 }
@@ -291,18 +294,18 @@ public:
                 bitbuf >>= static_cast<std::uint8_t>(entry);
                 bitsleft -= entry;
 
-                if (FAST_RAW_DEFLATE_UNLIKELY((entry & kSubtablePtr) != 0)) {
+                if (PICOFLATE_UNLIKELY((entry & kSubtablePtr) != 0)) {
                     entry = ll_tab[(entry >> 16) + ExtractVarBits(bitbuf, (entry >> 8) & 0x3FU)];
                     saved_bitbuf = bitbuf;
                     bitbuf >>= static_cast<std::uint8_t>(entry);
                     bitsleft -= entry;
                 }
                 if (static_cast<std::int32_t>(entry) < 0) {
-                    if (FAST_RAW_DEFLATE_UNLIKELY(out == out_end)) return false;
+                    if (PICOFLATE_UNLIKELY(out == out_end)) return false;
                     *out++ = static_cast<char>(entry >> 16);
                     continue;
                 }
-                if (FAST_RAW_DEFLATE_UNLIKELY((entry & kExceptional) != 0)) {
+                if (PICOFLATE_UNLIKELY((entry & kExceptional) != 0)) {
                     if ((entry & kEndOfBlock) != 0) goto block_done;
                     return false;
                 }
@@ -311,18 +314,18 @@ public:
                     (entry >> 16) +
                     static_cast<std::size_t>(ExtractVarBits8(saved_bitbuf, entry) >>
                                              static_cast<std::uint8_t>(entry >> 8));
-                if (FAST_RAW_DEFLATE_UNLIKELY(length > static_cast<std::size_t>(out_end - out))) {
+                if (PICOFLATE_UNLIKELY(length > static_cast<std::size_t>(out_end - out))) {
                     return false;
                 }
 
                 std::uint32_t d_entry = d_tab[bitbuf & kDistMask];
-                if (FAST_RAW_DEFLATE_UNLIKELY((d_entry & kExceptional) != 0)) {
-                    if (FAST_RAW_DEFLATE_UNLIKELY((d_entry & kSubtablePtr) == 0)) return false;
+                if (PICOFLATE_UNLIKELY((d_entry & kExceptional) != 0)) {
+                    if (PICOFLATE_UNLIKELY((d_entry & kSubtablePtr) == 0)) return false;
                     bitbuf >>= kDistBits;
                     bitsleft -= kDistBits;
                     d_entry = d_tab[(d_entry >> 16) +
                                     ExtractVarBits(bitbuf, (d_entry >> 8) & 0x3FU)];
-                    if (FAST_RAW_DEFLATE_UNLIKELY((d_entry & kExceptional) != 0)) return false;
+                    if (PICOFLATE_UNLIKELY((d_entry & kExceptional) != 0)) return false;
                 }
                 const std::size_t dist =
                     (d_entry >> 16) +
@@ -331,7 +334,7 @@ public:
                 bitbuf >>= static_cast<std::uint8_t>(d_entry);
                 bitsleft -= d_entry;
 
-                if (FAST_RAW_DEFLATE_UNLIKELY(dist > static_cast<std::size_t>(out - dst))) {
+                if (PICOFLATE_UNLIKELY(dist > static_cast<std::size_t>(out - dst))) {
                     return false;
                 }
                 const char* match = out - dist;
@@ -344,7 +347,7 @@ public:
         } while (!is_final);
 
         bitsleft = static_cast<std::uint8_t>(bitsleft);
-        if (FAST_RAW_DEFLATE_UNLIKELY(overread_count > (bitsleft >> 3))) return false;
+        if (PICOFLATE_UNLIKELY(overread_count > (bitsleft >> 3))) return false;
         out_len = static_cast<std::size_t>(out - dst);
         return true;
     }
@@ -356,14 +359,14 @@ private:
         std::uint64_t packed;  // [0:31]=in_adv, [32:39]=bitsleft, [40:47]=overread, [48:55]=ll_bits
     };
 
-    FAST_RAW_DEFLATE_FORCE_INLINE static unsigned HighestBit(unsigned x) noexcept {
+    PICOFLATE_FORCE_INLINE static unsigned HighestBit(unsigned x) noexcept {
 #if __has_cpp_attribute(assume)
         [[assume(x != 0U)]];
 #endif
         return std::bit_floor(x);
     }
 
-    FAST_RAW_DEFLATE_FORCE_INLINE static void RefillBranchless(
+    PICOFLATE_FORCE_INLINE static void RefillBranchless(
         const std::uint8_t*& in, std::uint64_t& bitbuf, std::uint32_t& bitsleft) noexcept {
         std::uint64_t w;
         std::memcpy(&w, in, sizeof(w));
@@ -372,26 +375,26 @@ private:
         bitsleft |= 56U;
     }
 
-    FAST_RAW_DEFLATE_FORCE_INLINE static bool RefillSafe(
+    PICOFLATE_FORCE_INLINE static bool RefillSafe(
         const std::uint8_t*& in, const std::uint8_t* in_end,
         std::uint64_t& bitbuf, std::uint32_t& bitsleft,
         std::size_t& overread_count) noexcept {
-        if (FAST_RAW_DEFLATE_LIKELY(in_end - in >= 8)) {
+        if (PICOFLATE_LIKELY(in_end - in >= 8)) {
             RefillBranchless(in, bitbuf, bitsleft);
             return true;
         }
         while (static_cast<std::uint8_t>(bitsleft) < 56U) {
-            if (FAST_RAW_DEFLATE_LIKELY(in < in_end)) {
+            if (PICOFLATE_LIKELY(in < in_end)) {
                 bitbuf |= static_cast<std::uint64_t>(*in++) << static_cast<std::uint8_t>(bitsleft);
             } else {
-                if (FAST_RAW_DEFLATE_UNLIKELY(++overread_count > 8U)) return false;
+                if (PICOFLATE_UNLIKELY(++overread_count > 8U)) return false;
             }
             bitsleft += 8U;
         }
         return true;
     }
 
-    FAST_RAW_DEFLATE_FORCE_INLINE static std::uint64_t ExtractVarBits(
+    PICOFLATE_FORCE_INLINE static std::uint64_t ExtractVarBits(
         std::uint64_t word, unsigned count) noexcept {
 #if defined(__BMI2__) && (defined(__x86_64__) || defined(_M_X64))
         return _bzhi_u64(word, count);
@@ -400,7 +403,7 @@ private:
 #endif
     }
 
-    FAST_RAW_DEFLATE_FORCE_INLINE static std::uint64_t ExtractVarBits8(
+    PICOFLATE_FORCE_INLINE static std::uint64_t ExtractVarBits8(
         std::uint64_t word, std::uint32_t entry) noexcept {
 #if defined(__BMI2__) && (defined(__x86_64__) || defined(_M_X64))
         return _bzhi_u64(word, entry);
@@ -409,21 +412,21 @@ private:
 #endif
     }
 
-    FAST_RAW_DEFLATE_FORCE_INLINE static void Copy8(char* dst, const char* src) noexcept {
+    PICOFLATE_FORCE_INLINE static void Copy8(char* dst, const char* src) noexcept {
         std::uint64_t v;
         std::memcpy(&v, src, 8);
         std::memcpy(dst, &v, 8);
     }
 
-    FAST_RAW_DEFLATE_FORCE_INLINE static void CopyMatchFast(
+    PICOFLATE_FORCE_INLINE static void CopyMatchFast(
         char* dst, const char* src, const char* out_next, std::size_t dist) noexcept {
-        if (FAST_RAW_DEFLATE_LIKELY(dist >= 8)) {
+        if (PICOFLATE_LIKELY(dist >= 8)) {
             Copy8(dst, src);
             Copy8(dst + 8, src + 8);
             dst += 16;
-            if (FAST_RAW_DEFLATE_UNLIKELY(dst < out_next)) {
+            if (PICOFLATE_UNLIKELY(dst < out_next)) {
                 src += 16;
-                FAST_RAW_DEFLATE_NOVECTOR
+                PICOFLATE_NOVECTOR
                 do {
                     Copy8(dst, src);
                     Copy8(dst + 8, src + 8);
@@ -435,14 +438,14 @@ private:
             const std::uint64_t v =
                 static_cast<std::uint64_t>(static_cast<std::uint8_t>(src[0])) *
                 0x0101010101010101ULL;
-            FAST_RAW_DEFLATE_NOVECTOR
+            PICOFLATE_NOVECTOR
             do {
                 std::memcpy(dst, &v, 8);
                 std::memcpy(dst + 8, &v, 8);
                 dst += 16;
             } while (dst < out_next);
         } else {
-            FAST_RAW_DEFLATE_NOVECTOR
+            PICOFLATE_NOVECTOR
             do {
                 Copy8(dst, src);
                 dst += dist;
@@ -451,14 +454,14 @@ private:
         }
     }
 
-    FAST_RAW_DEFLATE_FORCE_INLINE static void CopyMatchTail(
+    PICOFLATE_FORCE_INLINE static void CopyMatchTail(
         char* dst, const char* src, const char* out_next, std::size_t dist) noexcept {
-        if (FAST_RAW_DEFLATE_LIKELY(dist >= 8)) {
+        if (PICOFLATE_LIKELY(dist >= 8)) {
             Copy8(dst, src);
             dst += 8;
-            if (FAST_RAW_DEFLATE_UNLIKELY(dst < out_next)) {
+            if (PICOFLATE_UNLIKELY(dst < out_next)) {
                 src += 8;
-                FAST_RAW_DEFLATE_NOVECTOR
+                PICOFLATE_NOVECTOR
                 do {
                     Copy8(dst, src);
                     dst += 8;
@@ -466,14 +469,14 @@ private:
                 } while (dst < out_next);
             }
         } else {
-            FAST_RAW_DEFLATE_NOVECTOR
+            PICOFLATE_NOVECTOR
             do {
                 *dst++ = *src++;
             } while (dst < out_next);
         }
     }
 
-    FAST_RAW_DEFLATE_FORCE_INLINE static void DoubleTable(
+    PICOFLATE_FORCE_INLINE static void DoubleTable(
         std::uint32_t* table, unsigned cur_end) noexcept {
         if (cur_end < 8U) {
             if (cur_end == 4U) {
@@ -488,7 +491,7 @@ private:
         const char* s = reinterpret_cast<const char*>(table);
         char* d = reinterpret_cast<char*>(table + cur_end);
         const char* const s_end = d;
-        FAST_RAW_DEFLATE_NOVECTOR
+        PICOFLATE_NOVECTOR
         do {
             std::uint64_t w0, w1, w2, w3;
             std::memcpy(&w0, s, 8);
@@ -523,7 +526,7 @@ private:
         return r;
     }();
 
-    FAST_RAW_DEFLATE_NOINLINE FAST_RAW_DEFLATE_HOT DynHeaderResult DecodeDynamicTrees(
+    PICOFLATE_NOINLINE PICOFLATE_HOT DynHeaderResult DecodeDynamicTrees(
         const std::uint8_t* const in_start, const std::uint8_t* in_end,
         std::uint64_t bitbuf, std::uint32_t bitsleft,
         std::size_t overread_count) noexcept {
@@ -533,7 +536,7 @@ private:
         const unsigned hlit = 257U + static_cast<unsigned>((bitbuf >> 3) & 31U);
         const unsigned hdist = 1U + static_cast<unsigned>((bitbuf >> 8) & 31U);
         const unsigned hclen = 4U + static_cast<unsigned>((bitbuf >> 13) & 15U);
-        if (FAST_RAW_DEFLATE_UNLIKELY(hlit > 286U || hdist > 30U)) return bad;
+        if (PICOFLATE_UNLIKELY(hlit > 286U || hdist > 30U)) return bad;
 
         static constexpr std::uint8_t kClOrder[19] = {
             16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
@@ -541,24 +544,24 @@ private:
         cl_lens[kClOrder[0]] = static_cast<std::uint8_t>((bitbuf >> 17) & 7U);
         bitbuf >>= 20;
         bitsleft -= 20U;
-        if (FAST_RAW_DEFLATE_UNLIKELY(!RefillSafe(in, in_end, bitbuf, bitsleft, overread_count))) {
+        if (PICOFLATE_UNLIKELY(!RefillSafe(in, in_end, bitbuf, bitsleft, overread_count))) {
             return bad;
         }
 
-        FAST_RAW_DEFLATE_NOVECTOR
+        PICOFLATE_NOVECTOR
         for (unsigned i = 1; i < hclen; ++i) {
             cl_lens[kClOrder[i]] = static_cast<std::uint8_t>(bitbuf & 7U);
             bitbuf >>= 3;
             bitsleft -= 3U;
         }
 
-        alignas(32) std::uint32_t cl_tab[kPrecodeTableSize] FAST_RAW_DEFLATE_INDETERMINATE;
-        if (FAST_RAW_DEFLATE_UNLIKELY(!BuildPrecodeTable(cl_lens, cl_tab))) return bad;
+        alignas(32) std::uint32_t cl_tab[kPrecodeTableSize] PICOFLATE_INDETERMINATE;
+        if (PICOFLATE_UNLIKELY(!BuildPrecodeTable(cl_lens, cl_tab))) return bad;
 
         alignas(16) std::uint16_t ll_count[16]{};
         alignas(16) std::uint16_t d_count[16]{};
-        std::uint16_t ll_active[288] FAST_RAW_DEFLATE_INDETERMINATE;
-        std::uint16_t d_active[32] FAST_RAW_DEFLATE_INDETERMINATE;
+        std::uint16_t ll_active[288] PICOFLATE_INDETERMINATE;
+        std::uint16_t d_active[32] PICOFLATE_INDETERMINATE;
         unsigned n_ll = 0;
         unsigned n_d = 0;
         unsigned prev_len = 0;
@@ -583,10 +586,10 @@ private:
                                              static_cast<std::uint8_t>(e >> 8));
                 return true;
             }
-            if (FAST_RAW_DEFLATE_LIKELY((e & kExceptional) == 0)) {
+            if (PICOFLATE_LIKELY((e & kExceptional) == 0)) {
                 const unsigned l = e >> 16;
                 prev_len = l;
-                if (FAST_RAW_DEFLATE_LIKELY(idx < hlit)) {
+                if (PICOFLATE_LIKELY(idx < hlit)) {
                     ++ll_count[l];
                     ll_active[n_ll++] = static_cast<std::uint16_t>((l << 9) | idx);
                 } else {
@@ -596,15 +599,15 @@ private:
                 ++idx;
                 return true;
             }
-            if (FAST_RAW_DEFLATE_UNLIKELY((e & kSubtablePtr) == 0 || idx == 0U)) return false;
+            if (PICOFLATE_UNLIKELY((e & kSubtablePtr) == 0 || idx == 0U)) return false;
             const unsigned rep =
                 3U + static_cast<unsigned>(ExtractVarBits8(saved_bb, e) >>
                                            ((e >> 8) & 0xFU));
-            if (FAST_RAW_DEFLATE_UNLIKELY(idx + rep > total_codes)) return false;
+            if (PICOFLATE_UNLIKELY(idx + rep > total_codes)) return false;
             if (prev_len != 0U) {
                 const unsigned end_idx = idx + rep;
                 const unsigned hi = prev_len << 9;
-                if (FAST_RAW_DEFLATE_LIKELY(end_idx <= hlit)) {
+                if (PICOFLATE_LIKELY(end_idx <= hlit)) {
                     ll_count[prev_len] = static_cast<std::uint16_t>(ll_count[prev_len] + rep);
                     for (unsigned s = idx; s < end_idx; ++s) {
                         ll_active[n_ll++] = static_cast<std::uint16_t>(hi | s);
@@ -629,27 +632,27 @@ private:
             if (static_cast<std::uint8_t>(bitsleft) < 14U) {
                 RefillBranchless(in, bitbuf, bitsleft);
             }
-            if (FAST_RAW_DEFLATE_UNLIKELY(!step_rle())) return bad;
+            if (PICOFLATE_UNLIKELY(!step_rle())) return bad;
         }
         while (idx < total_codes) {
             if (static_cast<std::uint8_t>(bitsleft) < 14U) {
-                if (FAST_RAW_DEFLATE_UNLIKELY(
+                if (PICOFLATE_UNLIKELY(
                         !RefillSafe(in, in_end, bitbuf, bitsleft, overread_count))) {
                     return bad;
                 }
             }
-            if (FAST_RAW_DEFLATE_UNLIKELY(!step_rle())) return bad;
+            if (PICOFLATE_UNLIKELY(!step_rle())) return bad;
         }
 
-        if (FAST_RAW_DEFLATE_UNLIKELY(idx != total_codes)) return bad;
+        if (PICOFLATE_UNLIKELY(idx != total_codes)) return bad;
 
         unsigned ll_bits = kLitLenMaxBits;
-        if (FAST_RAW_DEFLATE_UNLIKELY(!BuildFromActive<true>(
+        if (PICOFLATE_UNLIKELY(!BuildFromActive<true>(
                 dyn_litlen_.data(), kLitLenTableCap, ll_count, ll_active, n_ll,
                 kLitLenResults.data(), kLitLenMaxBits, &ll_bits))) {
             return bad;
         }
-        if (FAST_RAW_DEFLATE_UNLIKELY(!BuildFromActive<false>(
+        if (PICOFLATE_UNLIKELY(!BuildFromActive<false>(
                 dyn_dist_.data(), kDistTableCap, d_count, d_active, n_d,
                 kDistResults.data(), kDistBits, nullptr))) {
             return bad;
@@ -701,12 +704,12 @@ private:
         return r;
     }();
 
-    FAST_RAW_DEFLATE_FORCE_INLINE static bool BuildPrecodeTable(
+    PICOFLATE_FORCE_INLINE static bool BuildPrecodeTable(
         const std::uint8_t* lens, std::uint32_t* table) noexcept {
         std::uint16_t count[8]{};
         unsigned n_active = 0;
-        std::uint16_t active[19] FAST_RAW_DEFLATE_INDETERMINATE;
-        FAST_RAW_DEFLATE_NOVECTOR
+        std::uint16_t active[19] PICOFLATE_INDETERMINATE;
+        PICOFLATE_NOVECTOR
         for (unsigned sym = 0; sym < 19; ++sym) {
             const unsigned l = lens[sym];
             if (l != 0) {
@@ -716,18 +719,18 @@ private:
         }
         unsigned max_len = 7;
         while (max_len > 0 && count[max_len] == 0) --max_len;
-        if (FAST_RAW_DEFLATE_UNLIKELY(max_len == 0)) return false;
+        if (PICOFLATE_UNLIKELY(max_len == 0)) return false;
 
-        std::uint16_t offs[8] FAST_RAW_DEFLATE_INDETERMINATE;
+        std::uint16_t offs[8] PICOFLATE_INDETERMINATE;
         std::uint16_t cur = 0;
         unsigned space = 0;
-        FAST_RAW_DEFLATE_NOVECTOR
+        PICOFLATE_NOVECTOR
         for (unsigned l = 1; l <= max_len; ++l) {
             offs[l] = cur;
             cur = static_cast<std::uint16_t>(cur + count[l]);
             space = (space << 1) + count[l];
         }
-        if (FAST_RAW_DEFLATE_UNLIKELY(space != (1U << max_len))) {
+        if (PICOFLATE_UNLIKELY(space != (1U << max_len))) {
             if (space > (1U << max_len) || n_active != 1 || max_len != 1) return false;
             const unsigned sym = active[0] & 31U;
             table[0] = kPrecodeResults[sym] + 0x0101U;
@@ -738,8 +741,8 @@ private:
             return true;
         }
 
-        std::uint8_t sorted[19] FAST_RAW_DEFLATE_INDETERMINATE;
-        FAST_RAW_DEFLATE_NOVECTOR
+        std::uint8_t sorted[19] PICOFLATE_INDETERMINATE;
+        PICOFLATE_NOVECTOR
         for (unsigned i = 0; i < n_active; ++i) {
             const unsigned p = active[i];
             sorted[offs[p >> 5]++] = static_cast<std::uint8_t>(p & 31U);
@@ -775,7 +778,7 @@ private:
     }
 
     template <bool RequireEob>
-    FAST_RAW_DEFLATE_FORCE_INLINE static bool BuildFromActive(
+    PICOFLATE_FORCE_INLINE static bool BuildFromActive(
         std::uint32_t* table, std::size_t table_cap,
         const std::uint16_t* count, const std::uint16_t* active, unsigned n_active,
         const std::uint32_t* base_results,
@@ -787,17 +790,17 @@ private:
             *table_bits_out = table_bits;
         }
 
-        std::uint16_t offs[16] FAST_RAW_DEFLATE_INDETERMINATE;
+        std::uint16_t offs[16] PICOFLATE_INDETERMINATE;
         std::uint16_t cur = 0;
         std::uint32_t space = 0;
-        FAST_RAW_DEFLATE_NOVECTOR
+        PICOFLATE_NOVECTOR
         for (unsigned l = 1; l <= max_len; ++l) {
             offs[l] = cur;
             cur = static_cast<std::uint16_t>(cur + count[l]);
             space = (space << 1) + count[l];
         }
 
-        if (FAST_RAW_DEFLATE_UNLIKELY(space != (1U << max_len))) {
+        if (PICOFLATE_UNLIKELY(space != (1U << max_len))) {
             if (space > (1U << max_len)) return false;
             if (space == 0) {
                 if constexpr (RequireEob) return false;
@@ -821,8 +824,8 @@ private:
         }
 
         constexpr std::size_t kMaxSyms = RequireEob ? 288 : 32;
-        std::uint16_t sorted[kMaxSyms] FAST_RAW_DEFLATE_INDETERMINATE;
-        FAST_RAW_DEFLATE_NOVECTOR
+        std::uint16_t sorted[kMaxSyms] PICOFLATE_INDETERMINATE;
+        PICOFLATE_NOVECTOR
         for (unsigned i = 0; i < n_active; ++i) {
             const unsigned p = active[i];
             sorted[offs[p >> 9]++] = static_cast<std::uint16_t>(p & 0x1FFU);
@@ -844,7 +847,7 @@ private:
                 table[codeword] = base + len_add;
                 if (codeword == cur_end - 1U) {
                     if constexpr (RequireEob) {
-                        if (FAST_RAW_DEFLATE_UNLIKELY((eob_or & kEndOfBlock) == 0)) return false;
+                        if (PICOFLATE_UNLIKELY((eob_or & kEndOfBlock) == 0)) return false;
                     }
                     for (; len < table_bits; ++len) {
                         DoubleTable(table, cur_end);
@@ -879,7 +882,7 @@ private:
                     sub_space = (sub_space << 1) + count[table_bits + sub_bits];
                 }
                 cur_end = sub_start + (1U << sub_bits);
-                if (FAST_RAW_DEFLATE_UNLIKELY(cur_end > table_cap)) return false;
+                if (PICOFLATE_UNLIKELY(cur_end > table_cap)) return false;
                 table[sub_prefix] = (static_cast<std::uint32_t>(sub_start) << 16) |
                                     kExceptional | kSubtablePtr |
                                     (sub_bits << 8) | table_bits;
@@ -891,7 +894,7 @@ private:
             const std::uint32_t entry = base + (extra_len << 8) + extra_len;
             unsigned i = sub_start + (codeword >> table_bits);
             const unsigned stride = 1U << extra_len;
-            FAST_RAW_DEFLATE_NOVECTOR
+            PICOFLATE_NOVECTOR
             do {
                 table[i] = entry;
                 i += stride;
@@ -899,7 +902,7 @@ private:
 
             if (codeword == (1U << len) - 1U) {
                 if constexpr (RequireEob) {
-                    if (FAST_RAW_DEFLATE_UNLIKELY((eob_or & kEndOfBlock) == 0)) return false;
+                    if (PICOFLATE_UNLIKELY((eob_or & kEndOfBlock) == 0)) return false;
                 }
                 return true;
             }
@@ -968,13 +971,16 @@ private:
     alignas(32) std::array<std::uint32_t, kDistTableCap> dyn_dist_{};
 };
 
-}  // namespace fast_raw_deflate
+using Picoflate = Inflater;
+using FastRawDeflate = Inflater;
 
-#undef FAST_RAW_DEFLATE_INDETERMINATE
-#undef FAST_RAW_DEFLATE_NOVECTOR
-#undef FAST_RAW_DEFLATE_RESTRICT
-#undef FAST_RAW_DEFLATE_UNLIKELY
-#undef FAST_RAW_DEFLATE_LIKELY
-#undef FAST_RAW_DEFLATE_HOT
-#undef FAST_RAW_DEFLATE_NOINLINE
-#undef FAST_RAW_DEFLATE_FORCE_INLINE
+}  // namespace picoflate
+
+#undef PICOFLATE_INDETERMINATE
+#undef PICOFLATE_NOVECTOR
+#undef PICOFLATE_RESTRICT
+#undef PICOFLATE_UNLIKELY
+#undef PICOFLATE_LIKELY
+#undef PICOFLATE_HOT
+#undef PICOFLATE_NOINLINE
+#undef PICOFLATE_FORCE_INLINE

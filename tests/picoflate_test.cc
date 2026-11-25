@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-#include "fast_raw_deflate/raw_deflate.h"
+#include "picoflate/picoflate.h"
 
 #include <zlib.h>
 
@@ -23,7 +23,7 @@
 
 namespace {
 
-using fast_raw_deflate::FastRawDeflate;
+using FastRawDeflate = picoflate::Inflater;
 
 std::vector<std::uint8_t> DecodeBase64(std::string_view in) {
     static constexpr const char* kChars =
@@ -313,7 +313,7 @@ int main() {
     const std::size_t structured = TestRfc1951EdgeCases(fast, seed);
     constexpr std::size_t kFuzzRuns = 25000;
     TestDifferentialFuzzAgainstZlib(fast, seed, kFuzzRuns);
-    std::printf("fast_raw_deflate_tests passed (%zu structured vectors + %zu fuzz cases)\n",
+    std::printf("picoflate_tests passed (%zu structured vectors + %zu fuzz cases)\n",
                 structured + 2, kFuzzRuns);
     return 0;
 }
