@@ -350,23 +350,17 @@ private:
     std::array<std::uint16_t, kDistTableCap> fixed_dist_{}, dyn_dist_{};
 };
 
-std::vector<std::uint8_t> DecodeBase64(std::string_view in) {
-    static constexpr const char* kChars =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    int tab[256];
-    std::memset(tab, -1, sizeof(tab));
-    for (int i = 0; i < 64; ++i) tab[static_cast<unsigned char>(kChars[i])] = i;
-    std::vector<std::uint8_t> out;
-    int val = 0, valb = -8;
-    for (unsigned char c : in) {
-        if (tab[c] == -1) break;
-        val = (val << 6) + tab[c];
-        valb += 6;
-        if (valb >= 0) {
-            out.push_back(static_cast<std::uint8_t>((val >> valb) & 0xFF));
-            valb -= 8;
-        }
-    }
+std::vector<std::uint8_t> CompressRawDeflate(std::string_view plain, int strategy) {
+    z_stream zc{};
+    deflateInit2(&zc, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, strategy);
+    std::vector<std::uint8_t> out(deflateBound(&zc, static_cast<uLong>(plain.size())) + 64);
+    zc.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(plain.data()));
+    zc.avail_in = static_cast<uInt>(plain.size());
+    zc.next_out = out.data();
+    zc.avail_out = static_cast<uInt>(out.size());
+    deflate(&zc, Z_FINISH);
+    out.resize(out.size() - zc.avail_out);
+    deflateEnd(&zc);
     return out;
 }
 
@@ -425,44 +419,55 @@ int main(int argc, char** argv) {
         else if (arg == "--rounds-csv" && i + 1 < argc) rounds_path = argv[++i];
     }
 
-    const std::string_view v1_b64 =
-        "XZI9TgUxDAbv4jqybH/5sbeEK9A9bUVLgYDuae9OaLwJ5Wp2nImVJ73TQS9vr1Tohw4d0dpQMY/uhT7oeDye9Dl/"
-        "aQE1Fir0Pb+ExWs1uspNdaHNW2xUalJjuEJXV5BUGe3fZFkn1+66u5Ku8UzfqIUnBZtsyRYjYWXT6r5EWbSkxrMY"
-        "baP3hVS5Gnps2FKeNKqArrMsu7y7tLGje190GFK3uRAZ63DY3W3cLLajAUkX7D7WbGDtwoTbsRipdlY3m5s+z0Jf"
-        "f+9AY17gPK9f";
-    const std::string_view v2_b64 =
-        "VdA7EgIhDAbgu6RmMoS8yJZ6BTuHytbCUbudvbvYwFIyH/nz2OEBG1xuV0jwhY08VJ1yCQlK8ITtft/h1b9olAjM"
-        "kODTX4IiYQZHmupDGZ2k1kXLUEJ3DzhaGtFMdbJiZVc5VXOhwRmtqvCiMtTQsjMtOqMVtRAvtTyTidDM+Tw2s47o"
-        "Unpn8T5Xawne/8v0DVo7fg==";
+    // 1. Tiny JSON Event (~320 B): stateless WebSocket / IoT telemetry push
+    const std::string plain_event =
+        R"({"type":"node.metrics","seq":104829,"ts":1732512000412,"host":"edge-04.prod",)"
+        R"("cpu":{"user":14.2,"sys":3.1,"idle":82.7},"net":{"rx_kbps":94210,"tx_kbps":88140},)"
+        R"("peers":[{"id":"n-01","rtt_us":184,"ok":true},{"id":"n-02","rtt_us":219,"ok":true},)"
+        R"({"id":"n-03","rtt_us":196,"ok":true}]})";
 
-    const auto raw1 = DecodeBase64(v1_b64);
-    const auto raw2 = DecodeBase64(v2_b64);
+    // 2. Small JSON-RPC Message (~560 B): microservice RPC response / realtime diff
+    const std::string plain_rpc =
+        R"({"jsonrpc":"2.0","id":98412,"result":{"cluster":"us-east-realtime","revision":491820,)"
+        R"("endpoints":[{"node":"gw-01","zone":"az1","conns":1420,"p50_us":142,"p99_us":410,"healthy":true},)"
+        R"({"node":"gw-02","zone":"az1","conns":1395,"p50_us":138,"p99_us":395,"healthy":true},)"
+        R"({"node":"gw-03","zone":"az2","conns":1448,"p50_us":151,"p99_us":432,"healthy":true},)"
+        R"({"node":"gw-04","zone":"az2","conns":1402,"p50_us":145,"p99_us":418,"healthy":true},)"
+        R"({"node":"gw-05","zone":"az3","conns":1389,"p50_us":149,"p99_us":425,"healthy":true}]}})";
 
-    // Structured 40-item JSON batch (~316 B -> 1345 B)
-    std::string big_json = R"({"c":"app","t":1795571028968,"l":[[)";
-    for (int i = 0; i < 20; ++i) {
-        if (i) big_json += ",";
-        big_json += R"({"p":")" + std::to_string(96500 - i * 7) + R"(.50","s":")" +
-                    std::to_string(i * 19 + 3) + R"(.1250"})";
+    // 3. Structured JSON Batch (~1.4 KB): multi-item API sync batch
+    std::string plain_batch = R"({"batch_id":774102,"service":"gateway-router","items":[)";
+    for (int i = 0; i < 18; ++i) {
+        if (i) plain_batch += ",";
+        plain_batch += R"({"id":"inst-)" + std::to_string(100 + i) +
+                       R"(","qps":)" + std::to_string(4820 - i * 37) +
+                       R"(,"lat_ms":")" + std::to_string(1 + (i % 5)) + "." +
+                       std::to_string(12 + i * 3) + R"(","active":true})";
     }
-    big_json += R"(],[)";
-    for (int i = 0; i < 20; ++i) {
-        if (i) big_json += ",";
-        big_json += R"({"p":")" + std::to_string(96510 + i * 7) + R"(.00","s":")" +
-                    std::to_string(i * 23 + 1) + R"(.8750"})";
-    }
-    big_json += R"(]],"r":[[0,2,5,8,12,17,19],[1,4,9,14,18]]})";
+    plain_batch += R"(],"dropped":[0,3,7,11,15]})";
 
-    z_stream zc{};
-    deflateInit2(&zc, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
-    std::vector<std::uint8_t> raw_big(4096);
-    zc.next_in = reinterpret_cast<Bytef*>(big_json.data());
-    zc.avail_in = static_cast<uInt>(big_json.size());
-    zc.next_out = raw_big.data();
-    zc.avail_out = static_cast<uInt>(raw_big.size());
-    deflate(&zc, Z_FINISH);
-    raw_big.resize(raw_big.size() - zc.avail_out);
-    deflateEnd(&zc);
+    // 4. 8 KB Log / API Page (~8.0 KB): structured HTTP access-log / trace page
+    static constexpr std::array<const char*, 6> kRoutes = {
+        "/api/v1/session/refresh", "/api/v1/stream/subscribe", "/api/v1/query/metrics",
+        "/api/v2/items/search",    "/api/v2/events/ack",       "/healthz/ready"};
+    std::string plain_page = R"({"cursor":"next_884120","count":64,"logs":[)";
+    for (int i = 0; i < 64; ++i) {
+        if (i) plain_page += ",";
+        const unsigned h = static_cast<unsigned>(i * 2654435761U);
+        plain_page += R"({"ts":)" + std::to_string(1732512000000ULL + i * 137ULL) +
+                      R"(,"req_id":"r-)" + std::to_string(100000U + (h % 900000U)) +
+                      R"(","route":")" + kRoutes[static_cast<std::size_t>(i) % kRoutes.size()] +
+                      R"(","status":)" + ((i % 19 == 0) ? "429" : "200") +
+                      R"(,"bytes":)" + std::to_string(240U + (h % 3800U)) +
+                      R"(,"dur_us":)" + std::to_string(85U + ((h >> 8) % 920U)) + "}";
+    }
+    plain_page += "]}";
+
+    const auto raw_event = CompressRawDeflate(plain_event, Z_DEFAULT_STRATEGY);
+    const auto raw_rpc   = CompressRawDeflate(plain_rpc, Z_DEFAULT_STRATEGY);
+    const auto raw_batch = CompressRawDeflate(plain_batch, Z_DEFAULT_STRATEGY);
+    const auto raw_page  = CompressRawDeflate(plain_page, Z_DEFAULT_STRATEGY);
+    const auto raw_fixed = CompressRawDeflate(plain_rpc, Z_FIXED);
 
     FastRawDeflateBaselineV0 fast_v0;
     picoflate::Inflater fast_opt;
@@ -473,21 +478,6 @@ int main(int argc, char** argv) {
 #endif
 
     std::vector<char> out(65536 + 64, '\0');
-    std::size_t len1 = 0, len2 = 0, len_big = 0;
-    (void)fast_opt.Inflate(raw1.data(), raw1.size(), out.data(), 65536, len1);
-    const std::string plain1(out.data(), len1);
-    (void)fast_opt.Inflate(raw2.data(), raw2.size(), out.data(), 65536, len2);
-    (void)fast_opt.Inflate(raw_big.data(), raw_big.size(), out.data(), 65536, len_big);
-
-    deflateInit2(&zc, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_FIXED);
-    std::vector<std::uint8_t> raw_fixed(1024);
-    zc.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(plain1.data()));
-    zc.avail_in = static_cast<uInt>(plain1.size());
-    zc.next_out = raw_fixed.data();
-    zc.avail_out = static_cast<uInt>(raw_fixed.size());
-    deflate(&zc, Z_FINISH);
-    raw_fixed.resize(raw_fixed.size() - zc.avail_out);
-    deflateEnd(&zc);
 
     std::ofstream summary_csv;
     if (!summary_path.empty()) {
@@ -506,11 +496,12 @@ int main(int argc, char** argv) {
         const std::vector<std::uint8_t>* raw;
         std::size_t out_bytes;
     };
-    const std::array<Case, 4> cases = {{
-        {"ws_json_v1_dyn", "WebSocket JSON frame v1 (Dynamic Huffman btype=2)", &raw1, len1},
-        {"ws_json_v2_dyn", "WebSocket JSON frame v2 (Dynamic Huffman btype=2)", &raw2, len2},
-        {"json_batch40_dyn", "Structured 40-item JSON batch (Dynamic Huffman btype=2)", &raw_big, len_big},
-        {"ws_json_v1_fixed", "WebSocket frame v1 pure decode loop (Fixed Huffman btype=1)", &raw_fixed, len1},
+    const std::array<Case, 5> cases = {{
+        {"json_event_320b_dyn", "Tiny JSON Event (Dynamic Huffman btype=2)", &raw_event, plain_event.size()},
+        {"json_rpc_560b_dyn",   "Small JSON-RPC Message (Dynamic Huffman btype=2)", &raw_rpc, plain_rpc.size()},
+        {"json_batch_1k4_dyn",  "Structured JSON Batch (Dynamic Huffman btype=2)", &raw_batch, plain_batch.size()},
+        {"json_page_8k_dyn",    "8 KB Log / API Page (Dynamic Huffman btype=2)", &raw_page, plain_page.size()},
+        {"json_rpc_560b_fixed", "Fixed-Tree Decode Loop (Fixed Huffman btype=1)", &raw_fixed, plain_rpc.size()},
     }};
 
     for (const auto& c : cases) {

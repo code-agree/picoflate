@@ -16,19 +16,19 @@ General-purpose DEFLATE engines (`zlib`, `zlib-ng`, `libdeflate`) optimize for *
 
 $$T_{\text{total}}(N) = T_{\text{tree}} + N \cdot c_{\text{token}}$$
 
-When $N \ge 64\text{ KB}$, Dynamic Huffman table construction ($T_{\text{tree}} \approx 1.1\text{ }\mu\text{s}$) is amortized to $< 1\%$ of total runtime.
+When $N \ge 64\text{ KB}$, Dynamic Huffman table construction ($T_{\text{tree}} \approx 1.2\text{ }\mu\text{s}$) is amortized to $< 1\%$ of total runtime.
 
-In real-time streaming protocols — stateless WebSocket `permessage-deflate` (`server_no_context_takeover`), incremental JSON event streams, and RPC/telemetry micro-messages ($N \in [100\text{ B}, 2\text{ KB}]$) — **the physics invert completely**:
+In real-time streaming protocols — stateless WebSocket `permessage-deflate` (`server_no_context_takeover`), JSON-RPC responses, and IoT/telemetry micro-messages ($N \in [100\text{ B}, 8\text{ KB}]$) — **the physics invert completely**:
 
-1. **Every single frame carries its own `btype = 2` Dynamic Huffman header.** Dissecting a production stateless WebSocket JSON frame (`207 B` compressed $\to$ `563 B` JSON):
-   - The Dynamic Huffman header consumes **`311 bits` (`38.9 B` = `18.8%` of the wire packet)**.
-   - The payload contains only **`178` literals + `42` short LZ77 matches** (`~361 ns` of actual token decoding).
-2. **87% of the RFC 1951 alphabet is dead space.** In typical JSON/ASCII micro-frames, only **`35 / 268` (`13%`)** literal/length symbols (`max_len = 8`) and **`10 / 19`** distance symbols (`max_len = 6`) have non-zero code lengths; **`233` symbols are zero**.
-3. **Why `libdeflate v1.22` spends 74% of its time before decoding byte 0:**
-   - On `207 B -> 563 B`, `libdeflate v1.22` takes `1540 ns`, of which **`~1146 ns` (`74.4%`) is spent purely building Huffman tables**.
-   - It materializes a `lens[320]` array during precode RLE, immediately re-scans all `268` symbols, and unconditionally executes `sorted_syms[offsets[lens[sym]]++] = sym` — hitting `offsets[0]++` **233 consecutive times** on the same stack address and triggering severe **Store-to-Load Forwarding stalls**, before filling fixed wide lookup tables regardless of symbol entropy.
+1. **Every single frame carries its own `btype = 2` Dynamic Huffman header.** Dissecting the `Small JSON-RPC Message` benchmark vector (`203 B` compressed $\to$ `520 B` JSON-RPC 2.0 response):
+   - The Dynamic Huffman header consumes **`333 bits` (`41.6 B` = `20.5%` of the wire packet)**.
+   - The payload contains only **`161` literals + `33` short LZ77 matches** (`~344 ns` of actual token decoding).
+2. **> 80% of the RFC 1951 alphabet is dead space.** In typical JSON/ASCII micro-frames, only **`50 / 272` (`18.4%`)** literal/length symbols (`max_len = 8`) and **`8 / 16`** distance symbols (`max_len = 5`) have non-zero code lengths; **`222` symbols are zero**.
+3. **Why `libdeflate v1.22` spends 76% of its time before decoding byte 0:**
+   - On `203 B -> 520 B`, `libdeflate v1.22` takes `1556 ns`, of which **`~1183 ns` (`76.0%`) is spent purely building Huffman tables**.
+   - It materializes a `lens[320]` array during precode RLE, immediately re-scans all `272` symbols, and unconditionally executes `sorted_syms[offsets[lens[sym]]++] = sym` — hitting `offsets[0]++` **222 consecutive times** on the same stack address and triggering severe **Store-to-Load Forwarding stalls**, before filling fixed wide lookup tables regardless of symbol entropy.
 
-**`picoflate` attacks $T_{\text{tree}}$ and $c_{\text{token}}$ simultaneously from first principles** — cutting Dynamic Huffman setup by **`3.94×`** (`291 ns` vs `1146 ns`) while also beating `libdeflate` on the pure LZ77+Huffman decode loop (`361 ns` vs `394 ns`), delivering **`2.0×–2.75×` end-to-end speedups** in a single zero-dependency header.
+**`picoflate` attacks $T_{\text{tree}}$ and $c_{\text{token}}$ simultaneously from first principles** — cutting Dynamic Huffman setup by **`3.66×`** (`323 ns` vs `1183 ns`) while also beating `libdeflate` on the pure LZ77+Huffman decode loop (`344 ns` vs `373 ns`), delivering **`1.44×–2.41×` end-to-end speedups across `280 B – 7.1 KB` payloads** in a single zero-dependency header.
 
 ---
 
@@ -37,7 +37,7 @@ In real-time streaming protocols — stateless WebSocket `permessage-deflate` (`
 ```mermaid
 flowchart LR
     A["Wire Bitstream (100 B - 16 KB)"] --> B["Pre-baked Precode RLE (Zero lens[320] buffer)"]
-    B --> C["Active-Only Collector (~35 non-zero syms)"]
+    B --> C["Active-Only Collector (~35-50 non-zero syms)"]
     C --> D["min(10, max_len) Table + 32B Block Doubling"]
     D --> E["Preload-Overlapped 64-bit FastLoop"]
     E --> F["Plaintext Output (+16B Slack)"]
@@ -62,22 +62,23 @@ Instead of unconditionally populating a `1024`-entry (`4 KB`) primary table when
 
 ## Benchmarks
 
-Measured with `100,000 iterations × 7 rounds` (`-std=c++26 -O3`, P-core pinned; raw per-round data in [`bench/results/rounds.csv`](bench/results/rounds.csv), summary in [`bench/results/summary.csv`](bench/results/summary.csv), full report in [`bench/results/benchmark_report.md`](bench/results/benchmark_report.md)):
+All workloads are deterministically generated from plain readable JSON/RPC/log strings in [`bench/picoflate_bench.cc`](bench/picoflate_bench.cc), measured over `100,000 iterations × 7 rounds` (`-std=c++26 -O3`, P-core pinned; raw per-round data in [`bench/results/rounds.csv`](bench/results/rounds.csv), summary in [`bench/results/summary.csv`](bench/results/summary.csv), full report in [`bench/results/benchmark_report.md`](bench/results/benchmark_report.md)):
 
 | Workload | Wire $\to$ Out | `zlib` | `libdeflate v1.22` | **`picoflate`** | vs `libdeflate v1.22` | vs `zlib` |
 | :--- | :---: | ---: | ---: | ---: | ---: | ---: |
-| **WebSocket JSON frame `v1` (`btype=2`)** | `207 B -> 563 B` | 1217 ns | 1540 ns | **652 ns** *(824 MiB/s)* | **2.36× faster (-57.7%)** | **1.87× faster (-46.4%)** |
-| **WebSocket JSON frame `v2` (`btype=2`)** | `148 B -> 323 B` | 1064 ns | 1400 ns | **509 ns** *(605 MiB/s)* | **2.75× faster (-63.6%)** | **2.09× faster (-52.1%)** |
-| **Structured 40-item JSON batch (`btype=2`)** | `316 B -> 1345 B` | 1474 ns | 1812 ns | **902 ns** *(1423 MiB/s)* | **2.01× faster (-50.3%)** | **1.64× faster (-38.9%)** |
-| **Pure decode loop (`btype=1` Fixed)** | `251 B -> 563 B` | 458 ns | 394 ns | **361 ns** *(1487 MiB/s)* | **1.09× faster (-8.3%)** | **1.27× faster (-21.1%)** |
+| **Tiny JSON Event (`btype=2` Dynamic)** | `173 B -> 280 B` | 1150 ns | 1432 ns | **594 ns** *(450 MiB/s)* | **2.41× faster (-58.5%)** | **1.94× faster (-48.4%)** |
+| **Small JSON-RPC Message (`btype=2` Dynamic)** | `203 B -> 520 B` | 1226 ns | 1556 ns | **667 ns** *(743 MiB/s)* | **2.33× faster (-57.1%)** | **1.84× faster (-45.6%)** |
+| **Structured JSON Batch (`btype=2` Dynamic)** | `279 B -> 1142 B` | 1368 ns | 1833 ns | **834 ns** *(1307 MiB/s)* | **2.20× faster (-54.5%)** | **1.64× faster (-39.1%)** |
+| **8 KB Log / API Page (`btype=2` Dynamic)** | `1278 B -> 7136 B` | 3267 ns | 3847 ns | **2670 ns** *(2549 MiB/s)* | **1.44× faster (-30.6%)** | **1.22× faster (-18.3%)** |
+| **Fixed-Tree Decode Loop (`btype=1` Fixed)** | `233 B -> 520 B` | 433 ns | 373 ns | **344 ns** *(1441 MiB/s)* | **1.08× faster (-7.7%)** | **1.26× faster (-20.5%)** |
 
-### Stage Breakdown (`207 B -> 563 B` WebSocket JSON Frame)
+### Stage Breakdown (`203 B -> 520 B` Small JSON-RPC Message)
 
 | Stage | `libdeflate v1.22` | **`picoflate`** | Speedup |
 | :--- | ---: | ---: | :---: |
-| **Stage A: Dynamic Huffman Header + RLE + Table Build** | ~1146 ns *(74%)* | **~291 ns** *(45%)* | **3.94×** |
-| **Stage B: LZ77 + Huffman Token Decode Loop** | ~394 ns *(26%)* | **~361 ns** *(55%)* | **1.09×** |
-| **End-to-End Total** | **1540 ns** | **652 ns** | **2.36×** |
+| **Stage A: Dynamic Huffman Header + RLE + Table Build** | ~1183 ns *(76%)* | **~323 ns** *(48%)* | **3.66×** |
+| **Stage B: LZ77 + Huffman Token Decode Loop** | ~373 ns *(24%)* | **~344 ns** *(52%)* | **1.08×** |
+| **End-to-End Total** | **1556 ns** | **667 ns** | **2.33×** |
 
 ---
 
@@ -85,7 +86,7 @@ Measured with `100,000 iterations × 7 rounds` (`-std=c++26 -O3`, P-core pinned;
 
 | Use Case | Recommended Engine |
 | :--- | :--- |
-| **Sub-KB to 16 KB Raw Deflate frames** (stateless `permessage-deflate` WebSocket streams, JSON incremental diffs, RPC/telemetry micro-messages) | **`picoflate`** (**2.0×–2.75× faster**, ~7.6 KB L1D state, header-only) |
+| **Sub-KB to 16 KB Raw Deflate frames** (stateless `permessage-deflate` WebSocket streams, JSON-RPC messages, telemetry/log micro-batches) | **`picoflate`** (**1.44×–2.41× faster**, ~7.6 KB L1D state, header-only) |
 | **Zero-dependency C++23/26 builds** (single header, zero heap allocations, no external C build step) | **`picoflate`** |
 | **Multi-megabyte files / bulk archives (`>= 64 KB`)**, `gzip`/`zlib` CRC32/Adler32 wrappers, or DEFLATE compression | **`libdeflate`** / **`zlib-ng`** |
 

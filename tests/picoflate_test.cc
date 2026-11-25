@@ -25,27 +25,6 @@ namespace {
 
 using FastRawDeflate = picoflate::Inflater;
 
-std::vector<std::uint8_t> DecodeBase64(std::string_view in) {
-    static constexpr const char* kChars =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    int tab[256];
-    std::memset(tab, -1, sizeof(tab));
-    for (int i = 0; i < 64; ++i) tab[static_cast<unsigned char>(kChars[i])] = i;
-    std::vector<std::uint8_t> out;
-    int val = 0;
-    int valb = -8;
-    for (unsigned char c : in) {
-        if (tab[c] == -1) break;
-        val = (val << 6) + tab[c];
-        valb += 6;
-        if (valb >= 0) {
-            out.push_back(static_cast<std::uint8_t>((val >> valb) & 0xFF));
-            valb -= 8;
-        }
-    }
-    return out;
-}
-
 std::vector<std::uint8_t> CompressZlib(
     std::string_view data, int level, int strategy, int flush_chunk = 0) {
     z_stream zs{};
@@ -134,29 +113,23 @@ void VerifyExactBounds(FastRawDeflate& fast, const std::vector<std::uint8_t>& co
 }
 
 void TestCapturedWsVectors(FastRawDeflate& fast) {
-    const std::string_view v1_b64 =
-        "XZI9TgUxDAbv4jqybH/5sbeEK9A9bUVLgYDuae9OaLwJ5Wp2nImVJ73TQS9vr1Tohw4d0dpQMY/uhT7oeDye9Dl/"
-        "aQE1Fir0Pb+ExWs1uspNdaHNW2xUalJjuEJXV5BUGe3fZFkn1+66u5Ku8UzfqIUnBZtsyRYjYWXT6r5EWbSkxrMY"
-        "baP3hVS5Gnps2FKeNKqArrMsu7y7tLGje190GFK3uRAZ63DY3W3cLLajAUkX7D7WbGDtwoTbsRipdlY3m5s+z0Jf"
-        "f+9AY17gPK9f";
-    const std::string_view v2_b64 =
-        "VdA7EgIhDAbgu6RmMoS8yJZ6BTuHytbCUbudvbvYwFIyH/nz2OEBG1xuV0jwhY08VJ1yCQlK8ITtft/h1b9olAjM"
-        "kODTX4IiYQZHmupDGZ2k1kXLUEJ3DzhaGtFMdbJiZVc5VXOhwRmtqvCiMtTQsjMtOqMVtRAvtTyTidDM+Tw2s47o"
-        "Unpn8T5Xawne/8v0DVo7fg==";
+    // Representative stateless WebSocket JSON event (~320 B) and JSON-RPC response (~560 B)
+    const std::string tiny_event =
+        R"({"type":"node.metrics","seq":104829,"ts":1732512000412,"host":"edge-04.prod",)"
+        R"("cpu":{"user":14.2,"sys":3.1,"idle":82.7},"net":{"rx_kbps":94210,"tx_kbps":88140},)"
+        R"("peers":[{"id":"n-01","rtt_us":184,"ok":true},{"id":"n-02","rtt_us":219,"ok":true},)"
+        R"({"id":"n-03","rtt_us":196,"ok":true}]})";
+    const std::string small_rpc =
+        R"({"jsonrpc":"2.0","id":98412,"result":{"cluster":"us-east-realtime","revision":491820,)"
+        R"("endpoints":[{"node":"gw-01","zone":"az1","conns":1420,"p50_us":142,"p99_us":410,"healthy":true},)"
+        R"({"node":"gw-02","zone":"az1","conns":1395,"p50_us":138,"p99_us":395,"healthy":true},)"
+        R"({"node":"gw-03","zone":"az2","conns":1448,"p50_us":151,"p99_us":432,"healthy":true},)"
+        R"({"node":"gw-04","zone":"az2","conns":1402,"p50_us":145,"p99_us":418,"healthy":true},)"
+        R"({"node":"gw-05","zone":"az3","conns":1389,"p50_us":149,"p99_us":425,"healthy":true}]}})";
 
-    for (std::string_view b64 : {v1_b64, v2_b64}) {
-        const auto raw = DecodeBase64(b64);
-        std::vector<char> z_out(8192, '\0');
-        z_stream zs{};
-        CHECK(inflateInit2(&zs, -MAX_WBITS) == Z_OK);
-        zs.next_in = const_cast<Bytef*>(raw.data());
-        zs.avail_in = static_cast<uInt>(raw.size());
-        zs.next_out = reinterpret_cast<Bytef*>(z_out.data());
-        zs.avail_out = static_cast<uInt>(z_out.size());
-        CHECK(inflate(&zs, Z_FINISH) == Z_STREAM_END);
-        const std::size_t z_len = z_out.size() - zs.avail_out;
-        inflateEnd(&zs);
-        VerifyExactBounds(fast, raw, std::string_view(z_out.data(), z_len));
+    for (std::string_view plain : {std::string_view(tiny_event), std::string_view(small_rpc)}) {
+        const auto raw = CompressZlib(plain, Z_DEFAULT_COMPRESSION, Z_DEFAULT_STRATEGY, 0);
+        VerifyExactBounds(fast, raw, plain);
     }
 }
 
