@@ -57,7 +57,7 @@ namespace picoflate {
 
 // Sub-microsecond, zero-allocation, header-only one-shot RFC 1951 raw-deflate (wbits = -15)
 // decompressor engineered from first principles for small-packet streaming (100 B .. 16 KB,
-// such as stateless WebSocket `permessage-deflate` frames and L2 order-book incremental diffs).
+// such as stateless WebSocket `permessage-deflate` frames, structured JSON diffs, and RPC micro-messages).
 //
 // First-principles design pillars:
 // 1. Zero-materialization fused RLE (`lens[]`-free Dynamic Huffman setup): precode symbols

@@ -438,8 +438,8 @@ int main(int argc, char** argv) {
     const auto raw1 = DecodeBase64(v1_b64);
     const auto raw2 = DecodeBase64(v2_b64);
 
-    // 40-level order-book diff (~316 B -> 1345 B)
-    std::string big_json = R"({"c":"BTC","t":1795571028968,"l":[[)";
+    // Structured 40-item JSON batch (~316 B -> 1345 B)
+    std::string big_json = R"({"c":"app","t":1795571028968,"l":[[)";
     for (int i = 0; i < 20; ++i) {
         if (i) big_json += ",";
         big_json += R"({"p":")" + std::to_string(96500 - i * 7) + R"(.50","s":")" +
@@ -507,10 +507,10 @@ int main(int argc, char** argv) {
         std::size_t out_bytes;
     };
     const std::array<Case, 4> cases = {{
-        {"mainnet_l2_v1_dyn", "Mainnet l2 diff v1 (Dynamic Huffman btype=2)", &raw1, len1},
-        {"mainnet_l2_v2_dyn", "Mainnet l2 diff v2 (Dynamic Huffman btype=2)", &raw2, len2},
-        {"book40_diff_dyn", "40-level l2 diff (Dynamic Huffman btype=2)", &raw_big, len_big},
-        {"mainnet_l2_v1_fixed", "Mainnet v1 pure decode loop (Fixed Huffman btype=1)", &raw_fixed, len1},
+        {"ws_json_v1_dyn", "WebSocket JSON frame v1 (Dynamic Huffman btype=2)", &raw1, len1},
+        {"ws_json_v2_dyn", "WebSocket JSON frame v2 (Dynamic Huffman btype=2)", &raw2, len2},
+        {"json_batch40_dyn", "Structured 40-item JSON batch (Dynamic Huffman btype=2)", &raw_big, len_big},
+        {"ws_json_v1_fixed", "WebSocket frame v1 pure decode loop (Fixed Huffman btype=1)", &raw_fixed, len1},
     }};
 
     for (const auto& c : cases) {

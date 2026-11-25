@@ -18,9 +18,9 @@ $$T_{\text{total}}(N) = T_{\text{tree}} + N \cdot c_{\text{token}}$$
 
 When $N \ge 64\text{ KB}$, Dynamic Huffman table construction ($T_{\text{tree}} \approx 1.1\text{ }\mu\text{s}$) is amortized to $< 1\%$ of total runtime.
 
-In real-time streaming protocols — stateless WebSocket `permessage-deflate` (`server_no_context_takeover`), exchange L2 order-book incremental diffs, and RPC/JSON micro-messages ($N \in [100\text{ B}, 2\text{ KB}]$) — **the physics invert completely**:
+In real-time streaming protocols — stateless WebSocket `permessage-deflate` (`server_no_context_takeover`), incremental JSON event streams, and RPC/telemetry micro-messages ($N \in [100\text{ B}, 2\text{ KB}]$) — **the physics invert completely**:
 
-1. **Every single frame carries its own `btype = 2` Dynamic Huffman header.** Dissecting a real mainnet BTC L2 order-book diff (`207 B` compressed $\to$ `563 B` JSON):
+1. **Every single frame carries its own `btype = 2` Dynamic Huffman header.** Dissecting a production stateless WebSocket JSON frame (`207 B` compressed $\to$ `563 B` JSON):
    - The Dynamic Huffman header consumes **`311 bits` (`38.9 B` = `18.8%` of the wire packet)**.
    - The payload contains only **`178` literals + `42` short LZ77 matches** (`~361 ns` of actual token decoding).
 2. **87% of the RFC 1951 alphabet is dead space.** In typical JSON/ASCII micro-frames, only **`35 / 268` (`13%`)** literal/length symbols (`max_len = 8`) and **`10 / 19`** distance symbols (`max_len = 6`) have non-zero code lengths; **`233` symbols are zero**.
@@ -66,12 +66,12 @@ Measured with `100,000 iterations × 7 rounds` (`-std=c++26 -O3`, P-core pinned;
 
 | Workload | Wire $\to$ Out | `zlib` | `libdeflate v1.22` | **`picoflate`** | vs `libdeflate v1.22` | vs `zlib` |
 | :--- | :---: | ---: | ---: | ---: | ---: | ---: |
-| **Mainnet BTC `l2` diff `v1` (`btype=2`)** | `207 B -> 563 B` | 1217 ns | 1540 ns | **652 ns** *(824 MiB/s)* | **2.36× faster (-57.7%)** | **1.87× faster (-46.4%)** |
-| **Mainnet BTC `l2` diff `v2` (`btype=2`)** | `148 B -> 323 B` | 1064 ns | 1400 ns | **509 ns** *(605 MiB/s)* | **2.75× faster (-63.6%)** | **2.09× faster (-52.1%)** |
-| **40-level order-book diff (`btype=2`)** | `316 B -> 1345 B` | 1474 ns | 1812 ns | **902 ns** *(1423 MiB/s)* | **2.01× faster (-50.3%)** | **1.64× faster (-38.9%)** |
+| **WebSocket JSON frame `v1` (`btype=2`)** | `207 B -> 563 B` | 1217 ns | 1540 ns | **652 ns** *(824 MiB/s)* | **2.36× faster (-57.7%)** | **1.87× faster (-46.4%)** |
+| **WebSocket JSON frame `v2` (`btype=2`)** | `148 B -> 323 B` | 1064 ns | 1400 ns | **509 ns** *(605 MiB/s)* | **2.75× faster (-63.6%)** | **2.09× faster (-52.1%)** |
+| **Structured 40-item JSON batch (`btype=2`)** | `316 B -> 1345 B` | 1474 ns | 1812 ns | **902 ns** *(1423 MiB/s)* | **2.01× faster (-50.3%)** | **1.64× faster (-38.9%)** |
 | **Pure decode loop (`btype=1` Fixed)** | `251 B -> 563 B` | 458 ns | 394 ns | **361 ns** *(1487 MiB/s)* | **1.09× faster (-8.3%)** | **1.27× faster (-21.1%)** |
 
-### Stage Breakdown (`207 B -> 563 B` Mainnet `l2` Diff)
+### Stage Breakdown (`207 B -> 563 B` WebSocket JSON Frame)
 
 | Stage | `libdeflate v1.22` | **`picoflate`** | Speedup |
 | :--- | ---: | ---: | :---: |
@@ -85,7 +85,7 @@ Measured with `100,000 iterations × 7 rounds` (`-std=c++26 -O3`, P-core pinned;
 
 | Use Case | Recommended Engine |
 | :--- | :--- |
-| **Sub-KB to 16 KB Raw Deflate frames** (`permessage-deflate` WebSocket feeds, exchange L2 diffs, RPC micro-messages) | **`picoflate`** (**2.0×–2.75× faster**, ~7.6 KB L1D state, header-only) |
+| **Sub-KB to 16 KB Raw Deflate frames** (stateless `permessage-deflate` WebSocket streams, JSON incremental diffs, RPC/telemetry micro-messages) | **`picoflate`** (**2.0×–2.75× faster**, ~7.6 KB L1D state, header-only) |
 | **Zero-dependency C++23/26 builds** (single header, zero heap allocations, no external C build step) | **`picoflate`** |
 | **Multi-megabyte files / bulk archives (`>= 64 KB`)**, `gzip`/`zlib` CRC32/Adler32 wrappers, or DEFLATE compression | **`libdeflate`** / **`zlib-ng`** |
 

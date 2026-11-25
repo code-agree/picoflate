@@ -133,7 +133,7 @@ void VerifyExactBounds(FastRawDeflate& fast, const std::vector<std::uint8_t>& co
     std::free(src_exact);
 }
 
-void TestMainnetVectors(FastRawDeflate& fast) {
+void TestCapturedWsVectors(FastRawDeflate& fast) {
     const std::string_view v1_b64 =
         "XZI9TgUxDAbv4jqybH/5sbeEK9A9bUVLgYDuae9OaLwJ5Wp2nImVJ73TQS9vr1Tohw4d0dpQMY/uhT7oeDye9Dl/"
         "aQE1Fir0Pb+ExWs1uspNdaHNW2xUalJjuEJXV5BUGe3fZFkn1+66u5Ku8UzfqIUnBZtsyRYjYWXT6r5EWbSkxrMY"
@@ -202,9 +202,9 @@ std::size_t TestRfc1951EdgeCases(FastRawDeflate& fast, std::vector<std::uint8_t>
         }
     }
 
-    // Realistic market-data order-book JSON diffs (1..40 levels)
+    // Structured nested JSON incremental payloads (1..40 items per group)
     for (int levels : {1, 2, 5, 12, 20, 40}) {
-        std::string j = R"({"c":"BTC","t":1795571028968,"l":[[)";
+        std::string j = R"({"c":"app","t":1795571028968,"l":[[)";
         for (int i = 0; i < levels; ++i) {
             if (i) j += ",";
             j += R"({"p":")" + std::to_string(96500 - i * 3) + R"(.50","s":")" +
@@ -308,7 +308,7 @@ void TestDifferentialFuzzAgainstZlib(FastRawDeflate& fast,
 
 int main() {
     FastRawDeflate fast;
-    TestMainnetVectors(fast);
+    TestCapturedWsVectors(fast);
     std::vector<std::uint8_t> seed;
     const std::size_t structured = TestRfc1951EdgeCases(fast, seed);
     constexpr std::size_t kFuzzRuns = 25000;
