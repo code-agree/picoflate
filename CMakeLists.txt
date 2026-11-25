@@ -1,0 +1,63 @@
+cmake_minimum_required(VERSION 3.20)
+project(fast_raw_deflate VERSION 0.1.0 LANGUAGES CXX)
+
+option(FAST_RAW_DEFLATE_BUILD_TESTS "Build FastRawDeflate unit & fuzz tests" ON)
+option(FAST_RAW_DEFLATE_BUILD_BENCH "Build FastRawDeflate microbenchmarks" ON)
+option(FAST_RAW_DEFLATE_USE_CXX26 "Compile tests/benchmarks with C++26 instead of C++23" OFF)
+
+add_library(fast_raw_deflate INTERFACE)
+add_library(fast_raw_deflate::fast_raw_deflate ALIAS fast_raw_deflate)
+target_include_directories(fast_raw_deflate INTERFACE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_compile_features(fast_raw_deflate INTERFACE cxx_std_23)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+  if(FAST_RAW_DEFLATE_USE_CXX26)
+    set(FAST_RAW_DEFLATE_STD cxx_std_26)
+  else()
+    set(FAST_RAW_DEFLATE_STD cxx_std_23)
+  endif()
+
+  if(NOT DEFINED BUILD_TARGET_ARCH)
+    if(APPLE)
+      set(FAST_RAW_DEFLATE_ARCH_FLAG "-mcpu=native")
+    else()
+      set(FAST_RAW_DEFLATE_ARCH_FLAG "-march=native")
+    endif()
+  else()
+    set(FAST_RAW_DEFLATE_ARCH_FLAG "-march=${BUILD_TARGET_ARCH}")
+  endif()
+
+  find_package(ZLIB REQUIRED)
+  find_package(libdeflate CONFIG QUIET)
+
+  if(FAST_RAW_DEFLATE_BUILD_TESTS)
+    enable_testing()
+    add_executable(fast_raw_deflate_tests tests/raw_deflate_test.cc)
+    target_link_libraries(fast_raw_deflate_tests PRIVATE fast_raw_deflate ZLIB::ZLIB)
+    target_compile_features(fast_raw_deflate_tests PRIVATE ${FAST_RAW_DEFLATE_STD})
+    target_compile_options(fast_raw_deflate_tests PRIVATE
+      -Wall -Wextra -Wpedantic -Werror ${FAST_RAW_DEFLATE_ARCH_FLAG})
+    add_test(NAME fast_raw_deflate_tests COMMAND fast_raw_deflate_tests)
+  endif()
+
+  if(FAST_RAW_DEFLATE_BUILD_BENCH)
+    add_executable(fast_raw_deflate_bench bench/deflate_bench.cc)
+    target_link_libraries(fast_raw_deflate_bench PRIVATE fast_raw_deflate ZLIB::ZLIB)
+    target_compile_features(fast_raw_deflate_bench PRIVATE ${FAST_RAW_DEFLATE_STD})
+    target_compile_options(fast_raw_deflate_bench PRIVATE
+      -O3 -Wall -Wextra -Wpedantic -Werror ${FAST_RAW_DEFLATE_ARCH_FLAG})
+    if(TARGET libdeflate::libdeflate_static)
+      target_link_libraries(fast_raw_deflate_bench PRIVATE libdeflate::libdeflate_static)
+      target_compile_definitions(fast_raw_deflate_bench PRIVATE FAST_RAW_DEFLATE_HAS_LIBDEFLATE=1)
+    elseif(TARGET libdeflate::libdeflate_shared)
+      target_link_libraries(fast_raw_deflate_bench PRIVATE libdeflate::libdeflate_shared)
+      target_compile_definitions(fast_raw_deflate_bench PRIVATE FAST_RAW_DEFLATE_HAS_LIBDEFLATE=1)
+    elseif(TARGET libdeflate::libdeflate)
+      target_link_libraries(fast_raw_deflate_bench PRIVATE libdeflate::libdeflate)
+      target_compile_definitions(fast_raw_deflate_bench PRIVATE FAST_RAW_DEFLATE_HAS_LIBDEFLATE=1)
+    endif()
+  endif()
+endif()

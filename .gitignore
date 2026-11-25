@@ -1,0 +1,9 @@
+build/
+builds/
+deps/
+*.o
+*.dSYM/
+.DS_Store
+compile_commands.json
+bench_bin
+test_bin
