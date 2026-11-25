@@ -12,15 +12,15 @@
 
 ## First-Principles Motivation: Why `libdeflate` & `zlib` Hit a Wall on Sub-Kilobyte Frames
 
-General-purpose DEFLATE engines (`zlib`, `zlib-ng`, `libdeflate`) optimize for **asymptotic bulk throughput** ($\text{MB/s}$ on $\ge 64\text{ KB}$ files):
+General-purpose DEFLATE engines (`zlib`, `zlib-ng`, `libdeflate`) optimize for **asymptotic bulk throughput** (`MB/s` on `>= 64 KB` files):
 
-$$T_{\text{total}}(N) = T_{\text{tree}} + N \cdot c_{\text{token}}$$
+> **<i>T</i><sub>total</sub>(<i>N</i>) = <i>T</i><sub>tree</sub> + <i>N</i> · <i>c</i><sub>token</sub>**
 
-When $N \ge 64\text{ KB}$, Dynamic Huffman table construction ($T_{\text{tree}} \approx 1.2\text{ }\mu\text{s}$) is amortized to $< 1\%$ of total runtime.
+When `N >= 64 KB`, Dynamic Huffman table construction (<i>T</i><sub>tree</sub> ≈ `1.2 µs`) is amortized to `< 1%` of total runtime.
 
-In real-time streaming protocols — stateless WebSocket `permessage-deflate` (`server_no_context_takeover`), JSON-RPC responses, and IoT/telemetry micro-messages ($N \in [100\text{ B}, 8\text{ KB}]$) — **the physics invert completely**:
+In real-time streaming protocols — stateless WebSocket `permessage-deflate` (`server_no_context_takeover`), JSON-RPC responses, and IoT/telemetry micro-messages (`N` in `100 B – 8 KB`) — **the physics invert completely**:
 
-1. **Every single frame carries its own `btype = 2` Dynamic Huffman header.** Dissecting the `Small JSON-RPC Message` benchmark vector (`203 B` compressed $\to$ `520 B` JSON-RPC 2.0 response):
+1. **Every single frame carries its own `btype = 2` Dynamic Huffman header.** Dissecting the `Small JSON-RPC Message` benchmark vector (`203 B` compressed → `520 B` JSON-RPC 2.0 response):
    - The Dynamic Huffman header consumes **`333 bits` (`41.6 B` = `20.5%` of the wire packet)**.
    - The payload contains only **`161` literals + `33` short LZ77 matches** (`~344 ns` of actual token decoding).
 2. **> 80% of the RFC 1951 alphabet is dead space.** In typical JSON/ASCII micro-frames, only **`50 / 272` (`18.4%`)** literal/length symbols (`max_len = 8`) and **`8 / 16`** distance symbols (`max_len = 5`) have non-zero code lengths; **`222` symbols are zero**.
@@ -28,7 +28,7 @@ In real-time streaming protocols — stateless WebSocket `permessage-deflate` (`
    - On `203 B -> 520 B`, `libdeflate v1.22` takes `1556 ns`, of which **`~1183 ns` (`76.0%`) is spent purely building Huffman tables**.
    - It materializes a `lens[320]` array during precode RLE, immediately re-scans all `272` symbols, and unconditionally executes `sorted_syms[offsets[lens[sym]]++] = sym` — hitting `offsets[0]++` **222 consecutive times** on the same stack address and triggering severe **Store-to-Load Forwarding stalls**, before filling fixed wide lookup tables regardless of symbol entropy.
 
-**`picoflate` attacks $T_{\text{tree}}$ and $c_{\text{token}}$ simultaneously from first principles** — cutting Dynamic Huffman setup by **`3.66×`** (`323 ns` vs `1183 ns`) while also beating `libdeflate` on the pure LZ77+Huffman decode loop (`344 ns` vs `373 ns`), delivering **`1.44×–2.41×` end-to-end speedups across `280 B – 7.1 KB` payloads** in a single zero-dependency header.
+**`picoflate` attacks <i>T</i><sub>tree</sub> and <i>c</i><sub>token</sub> simultaneously from first principles** — cutting Dynamic Huffman setup by **`3.66×`** (`323 ns` vs `1183 ns`) while also beating `libdeflate` on the pure LZ77+Huffman decode loop (`344 ns` vs `373 ns`), delivering **`1.44×–2.41×` end-to-end speedups across `280 B – 7.1 KB` payloads** in a single zero-dependency header.
 
 ---
 
@@ -47,7 +47,7 @@ flowchart LR
 Precode symbols `{0, 17, 18}` (all zero-length runs) are pre-baked into sign-flagged 32-bit entries (`kLiteralFlag | (base_rep << 16) | extra_bits`). During RLE decoding, zero-runs advance the symbol cursor in **one branchless shift-add** without ever allocating, writing, or rescanning a `lens[320]` buffer. Only active `(len, sym)` pairs are collected, completely eliminating `offsets[0]++` store-forwarding hazards and external `memset` calls.
 
 ### 2. Entropy-Proportional Primary Tables & Register-Bound Block Doubling
-Instead of unconditionally populating a `1024`-entry (`4 KB`) primary table when a small frame's `max_len` is `7` or `8`, `picoflate` sizes the primary `litlen` table dynamically to $\min(10, L_{\max})$ (`128`–`1024` entries) and expands canonical bit-reversed codewords via `std::bit_floor` (`[[assume]]`) + inline 32-byte unrolled block doubling (`DoubleTable`) with zero PLT `memcpy` calls.
+Instead of unconditionally populating a `1024`-entry (`4 KB`) primary table when a small frame's `max_len` is `7` or `8`, `picoflate` sizes the primary `litlen` table dynamically to `min(10, max_len)` (`128`–`1024` entries) and expands canonical bit-reversed codewords via `std::bit_floor` (`[[assume]]`) + inline 32-byte unrolled block doubling (`DoubleTable`) with zero PLT `memcpy` calls.
 
 ### 3. Single-Shift 32-bit Pre-baked Entries + Preload-Overlapped FastLoop
 - **Single-lookup token entries**: Folds literal sign flag (`int32_t < 0`), match length/offset base, `codeword_bits`, and `codeword_bits + extra_bits` into one `uint32_t` entry — eliminating 4 separate RFC 1951 base/extra lookup tables.
@@ -64,7 +64,7 @@ Instead of unconditionally populating a `1024`-entry (`4 KB`) primary table when
 
 All workloads are deterministically generated from plain readable JSON/RPC/log strings in [`bench/picoflate_bench.cc`](bench/picoflate_bench.cc), measured over `100,000 iterations × 7 rounds` (`-std=c++26 -O3`, P-core pinned; raw per-round data in [`bench/results/rounds.csv`](bench/results/rounds.csv), summary in [`bench/results/summary.csv`](bench/results/summary.csv), full report in [`bench/results/benchmark_report.md`](bench/results/benchmark_report.md)):
 
-| Workload | Wire $\to$ Out | `zlib` | `libdeflate v1.22` | **`picoflate`** | vs `libdeflate v1.22` | vs `zlib` |
+| Workload | Wire → Out | `zlib` | `libdeflate v1.22` | **`picoflate`** | vs `libdeflate v1.22` | vs `zlib` |
 | :--- | :---: | ---: | ---: | ---: | ---: | ---: |
 | **Tiny JSON Event (`btype=2` Dynamic)** | `173 B -> 280 B` | 1150 ns | 1432 ns | **594 ns** *(450 MiB/s)* | **2.41× faster (-58.5%)** | **1.94× faster (-48.4%)** |
 | **Small JSON-RPC Message (`btype=2` Dynamic)** | `203 B -> 520 B` | 1226 ns | 1556 ns | **667 ns** *(743 MiB/s)* | **2.33× faster (-57.1%)** | **1.84× faster (-45.6%)** |

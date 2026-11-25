@@ -8,15 +8,15 @@
 
 ## 第一性原理：为什么 `libdeflate` 与 `zlib` 在亚 KB 级实时小包上撞上性能墙？
 
-主流工业级 DEFLATE 库（`zlib`、`zlib-ng`、`libdeflate`）的目标函数都是**渐近大块吞吐率**（针对 $\ge 64\text{ KB}$ 文件的 $\text{MB/s}$）：
+主流工业级 DEFLATE 库（`zlib`、`zlib-ng`、`libdeflate`）的目标函数都是**渐近大块吞吐率**（针对 `>= 64 KB` 文件的 `MB/s`）：
 
-$$T_{\text{total}}(N) = T_{\text{tree}} + N \cdot c_{\text{token}}$$
+> **<i>T</i><sub>total</sub>(<i>N</i>) = <i>T</i><sub>tree</sub> + <i>N</i> · <i>c</i><sub>token</sub>**
 
-当负载 $N \ge 64\text{ KB}$ 时，约 `1.2 µs` 的动态 Huffman 建表开销 $T_{\text{tree}}$ 被摊薄到不足 `1%`。
+当负载 `N >= 64 KB` 时，约 `1.2 µs` 的动态 Huffman 建表开销 <i>T</i><sub>tree</sub> 被摊薄到不足 `1%`。
 
-但在低延迟实时流场景——无状态 WebSocket `permessage-deflate`（`server_no_context_takeover`）、JSON-RPC 微服务响应、IoT 遥测与结构化日志微批次（$N \in [100\text{ B}, 8\text{ KB}]$）中，**物理约束发生了根本反转**：
+但在低延迟实时流场景——无状态 WebSocket `permessage-deflate`（`server_no_context_takeover`）、JSON-RPC 微服务响应、IoT 遥测与结构化日志微批次（`N` 处于 `100 B – 8 KB`）中，**物理约束发生了根本反转**：
 
-1. **每一帧都携带独立的 `btype = 2` 动态 Huffman 树头**：解剖 [`bench/picoflate_bench.cc`](bench/picoflate_bench.cc) 中的 `Small JSON-RPC Message` 样本（压缩态 `203 B` $\to$ 解压态 `520 B` JSON-RPC 响应）：
+1. **每一帧都携带独立的 `btype = 2` 动态 Huffman 树头**：解剖 [`bench/picoflate_bench.cc`](bench/picoflate_bench.cc) 中的 `Small JSON-RPC Message` 样本（压缩态 `203 B` → 解压态 `520 B` JSON-RPC 响应）：
    - 动态 Huffman 树头占 **`333 bits`（`41.6 B`，占整包压缩字节的 `20.5%`）**；
    - 实际数据负载仅有 **`161` 个字面量 + `33` 次短距离 LZ77 匹配**（纯解码耗时仅 `~344 ns`）。
 2. **超过 80% 的 RFC 1951 字母表是全零死区**：在典型 JSON/ASCII 微帧中，`272` 个字面量/长度符号里仅有 **`50` 个活跃非零符号**（占 `18.4%`，`max_len = 8`），其余 **`222` 个符号码长全为 0**。
@@ -24,7 +24,7 @@ $$T_{\text{total}}(N) = T_{\text{tree}} + N \cdot c_{\text{token}}$$
    - 在 `203 B -> 520 B` 样本上，`libdeflate v1.22` 耗时 `1556 ns`，其中 **`~1183 ns`（`76.0%`）消耗在动态树建表阶段**；
    - 它先分配并写出 `lens[320]` 数组，随即重扫全部 `272` 个符号并无条件执行 `sorted_syms[offsets[lens[sym]]++] = sym`——对同一个栈地址 `offsets[0]` 连续执行 **222 次读写递增**，触发严重的 CPU **Store-to-Load Forwarding（存储转发）流水线停顿**，随后又无视实际信息熵强行填充固定宽度大表。
 
-**`picoflate` 从第一性原理出发同时击穿 $T_{\text{tree}}$ 与 $c_{\text{token}}$**：将动态树建表耗时压缩 **`3.66×`**（`323 ns` vs `1183 ns`），同时在纯解码循环上继续领先 `libdeflate v1.22` `8.4%`（`344 ns` vs `373 ns`），在 `280 B – 7.1 KB` 全梯度负载上以零外部依赖单头文件实现 **`1.44×–2.41×` 的端到端加速**。
+**`picoflate` 从第一性原理出发同时击穿 <i>T</i><sub>tree</sub> 与 <i>c</i><sub>token</sub>**：将动态树建表耗时压缩 **`3.66×`**（`323 ns` vs `1183 ns`），同时在纯解码循环上继续领先 `libdeflate v1.22` `8.4%`（`344 ns` vs `373 ns`），在 `280 B – 7.1 KB` 全梯度负载上以零外部依赖单头文件实现 **`1.44×–2.41×` 的端到端加速**。
 
 ---
 
@@ -34,7 +34,7 @@ $$T_{\text{total}}(N) = T_{\text{tree}} + N \cdot c_{\text{token}}$$
 将前导码（Precode）中代表零游程的三个符号 `{0, 17, 18}` 在编译期预烘焙为最高位置 1 的 32-bit 表项（`kLiteralFlag | (base_rep << 16) | extra_bits`）。RLE 展开时，所有零码长区间直接通过单条无分支移位加法推进符号游标，**全程不分配、不写入、不重扫 `lens[320]` 缓冲区**，仅就地收集约 35–50 个非零活跃符号，彻底根除 `offsets[0]++` 存储转发停顿与外部 `memset` 调用。
 
 ### 2. 信息熵自适应主表宽度 + 寄存器内联成倍复制
-根据帧内真实最大码长动态收缩主表宽度至 $\min(10, L_{\max})$（如 `max_len = 8` 时主表仅 `256` 项 = `1 KB`，驻留 L1D），配合 `std::bit_floor`（`[[assume]]`）反序码字自增与 32 字节内联块翻倍（`DoubleTable`），零 PLT `memcpy` 调用完成建表。
+根据帧内真实最大码长动态收缩主表宽度至 `min(10, max_len)`（如 `max_len = 8` 时主表仅 `256` 项 = `1 KB`，驻留 L1D），配合 `std::bit_floor`（`[[assume]]`）反序码字自增与 32 字节内联块翻倍（`DoubleTable`），零 PLT `memcpy` 调用完成建表。
 
 ### 3. 单次移位 32-bit 预烘焙解码项 + 预取重叠 FastLoop
 - **单表项折叠全部解码元数据**：将字面量符号位判定（`int32_t < 0`）、匹配基数、`codeword_bits` 与 `codeword_bits + extra_bits` 打包进单个 `uint32_t`，彻底省去 4 张独立的 Base/Extra 查表与二次分支。
@@ -51,7 +51,7 @@ $$T_{\text{total}}(N) = T_{\text{tree}} + N \cdot c_{\text{token}}$$
 
 全部测试负载均由 [`bench/picoflate_bench.cc`](bench/picoflate_bench.cc) 中的可读明文确定性生成，经 `100,000 次迭代 × 7 轮`（`-std=c++26 -O3`，绑定性能大核）实测；原始逐轮 CSV 见 [`bench/results/rounds.csv`](bench/results/rounds.csv)，汇总见 [`bench/results/summary.csv`](bench/results/summary.csv)，详细拆解见 [`bench/results/benchmark_report.md`](bench/results/benchmark_report.md)：
 
-| 测试负载（按尺寸梯度） | 压缩 $\to$ 解压 | `zlib` | `libdeflate v1.22` | **`picoflate`** | 相比 `libdeflate v1.22` | 相比 `zlib` |
+| 测试负载（按尺寸梯度） | 压缩 → 解压 | `zlib` | `libdeflate v1.22` | **`picoflate`** | 相比 `libdeflate v1.22` | 相比 `zlib` |
 | :--- | :---: | ---: | ---: | ---: | ---: | ---: |
 | **Tiny JSON Event (`btype=2` Dynamic)** | `173 B -> 280 B` | 1150 ns | 1432 ns | **594 ns** *(450 MiB/s)* | **快 2.41× (-58.5%)** | **快 1.94× (-48.4%)** |
 | **Small JSON-RPC Message (`btype=2` Dynamic)** | `203 B -> 520 B` | 1226 ns | 1556 ns | **667 ns** *(743 MiB/s)* | **快 2.33× (-57.1%)** | **快 1.84× (-45.6%)** |
